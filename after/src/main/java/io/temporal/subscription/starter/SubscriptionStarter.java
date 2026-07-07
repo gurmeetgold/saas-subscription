@@ -18,26 +18,34 @@ import java.util.logging.Logger;
  * This demonstrates that Temporal can run millions of concurrent workflows —
  * each customer's subscription is completely isolated from every other.
  *
- * Trial period = 10 seconds, billing period = 15 seconds for demo purposes.
- * In production these would be Duration.ofDays(14) and Duration.ofDays(30).
+ * Timings (demo-friendly):
+ *   Trial period   = 60 seconds  (production: 14 days)
+ *   Billing period = 90 seconds  (production: 30 days)
+ *   Max cycles     = 3
+ *
+ * This gives you ~60 seconds to cancel C-003 during trial,
+ * and ~90 seconds between billing cycles to send signals and queries.
+ *
+ * Re-running: if workflows already exist from a previous run, this prints
+ * a reminder to reset Temporal. See README for the reset command.
  *
  * Prerequisites:
- *   1. temporal server start-dev   (terminal 1)
- *   2. SubscriptionWorker running  (terminal 2)
- *   3. Run this class              (terminal 3)
+ *   1. temporal server start-dev   (terminal)
+ *   2. SubscriptionWorker running  (IntelliJ)
+ *   3. Run this class              (IntelliJ)
  */
 public class SubscriptionStarter {
 
     private static final Logger log = Logger.getLogger(SubscriptionStarter.class.getName());
 
-    // Demo customers — each gets their own independent workflow execution
+    // Fixed IDs — simple, stable, match the cancel/query/update configs exactly.
     private static final List<Customer> DEMO_CUSTOMERS = Arrays.asList(
         new Customer("C-001", "alice@acme.com",    "Acme Corp",
-                     10, 15, 3, 99.0),   // 10s trial, 15s billing, 3 cycles, $99/mo
+                     60, 90, 3, 99.0),   // 60s trial, 90s billing, 3 cycles
         new Customer("C-002", "bob@globex.com",    "Globex Inc",
-                     10, 15, 3, 149.0),  // $149/mo
+                     60, 90, 3, 149.0),
         new Customer("C-003", "carol@initech.com", "Initech",
-                     10, 15, 3, 49.0)    // $49/mo — we will cancel this one mid-trial
+                     60, 90, 3, 49.0)    // cancel this one during the 60s trial window
     );
 
     public static void main(String[] args) {
@@ -45,30 +53,28 @@ public class SubscriptionStarter {
         WorkflowClient       client  = WorkflowClient.newInstance(service);
 
         for (Customer customer : DEMO_CUSTOMERS) {
-            SubscriptionWorkflow workflow = client.newWorkflowStub(
-                    SubscriptionWorkflow.class,
-                    WorkflowOptions.newBuilder()
-                            .setTaskQueue(SubscriptionWorkflowImpl.TASK_QUEUE)
-                            // Stable, idempotent ID — running this twice for the
-                            // same customer does NOT start a second workflow.
-                            .setWorkflowId("subscription-" + customer.getCustomerId())
-                            .build()
-            );
-
-            // Start async — we don't wait for completion here.
-            // Each workflow runs independently on the Worker.
-            WorkflowClient.start(workflow::run, customer);
-            log.info("Started subscription workflow for " + customer.getCompanyName()
-                    + " [" + customer.getEmail() + "]");
+            String workflowId = "subscription-" + customer.getCustomerId();
+            try {
+                SubscriptionWorkflow workflow = client.newWorkflowStub(
+                        SubscriptionWorkflow.class,
+                        WorkflowOptions.newBuilder()
+                                .setTaskQueue(SubscriptionWorkflowImpl.TASK_QUEUE)
+                                .setWorkflowId(workflowId)
+                                .build()
+                );
+                WorkflowClient.start(workflow::run, customer);
+                log.info("✓ Started: " + customer.getCompanyName()
+                        + " [" + customer.getEmail() + "]");
+            } catch (io.temporal.client.WorkflowExecutionAlreadyStarted e) {
+                log.warning("Workflow already exists: " + workflowId
+                        + " — reset Temporal first: temporal server start-dev (restart it)");
+            }
         }
 
-        log.info("\n====================================================");
-        log.info("3 subscription workflows started.");
-        log.info("Watch them live: http://localhost:8233");
-        log.info("After ~5 seconds, try:");
-        log.info("  CancelSubscriptionStarter C-003  (cancel during trial)");
-        log.info("  QueryBillingStarter C-001         (inspect live state)");
-        log.info("  UpdateBillingStarter C-002 200.0  (change billing amount)");
+        log.info("====================================================");
+        log.info("Workflows started. Watch live: http://localhost:8233");
+        log.info("You have 60 seconds to run Cancel C-003.");
+        log.info("If you see 'already exists' errors: restart temporal server start-dev");
         log.info("====================================================");
     }
 }
