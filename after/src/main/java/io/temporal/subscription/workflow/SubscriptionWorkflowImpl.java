@@ -55,7 +55,7 @@ import java.time.Duration;
  */
 public class SubscriptionWorkflowImpl implements SubscriptionWorkflow {
 
-    static final String TASK_QUEUE = "subscription-task-queue";
+    public static final String TASK_QUEUE = "subscription-task-queue";
 
     // ── Workflow state — survives crashes, replays, and Worker restarts ───────
 
@@ -85,7 +85,7 @@ public class SubscriptionWorkflowImpl implements SubscriptionWorkflow {
     public void run(Customer customer) {
         this.currentCharge = customer.getBillingPeriodCharge();
 
-        Workflow.getLogger(this).info(
+        Workflow.getLogger(SubscriptionWorkflowImpl.class).info(
                 "Subscription started for " + customer.getCompanyName());
 
         // ── Phase 1: Free trial ───────────────────────────────────────────────
@@ -111,14 +111,14 @@ public class SubscriptionWorkflowImpl implements SubscriptionWorkflow {
             // BEFORE version: same generic "subscription cancelled" email every time.
             activities.sendTrialCancellationEmail(customer.getEmail(), customer.getCompanyName());
             status = "CANCELLED";
-            Workflow.getLogger(this).info("Cancelled during trial: " + customer.getEmail());
+            Workflow.getLogger(SubscriptionWorkflowImpl.class).info("Cancelled during trial: " + customer.getEmail());
             return;
         }
 
         // ── Phase 2: Billing loop ─────────────────────────────────────────────
 
         status = "ACTIVE";
-        Workflow.getLogger(this).info("Trial ended, billing started: " + customer.getEmail());
+        Workflow.getLogger(SubscriptionWorkflowImpl.class).info("Trial ended, billing started: " + customer.getEmail());
 
         for (int i = 0; i < customer.getMaxBillingPeriods(); i++) {
 
@@ -140,7 +140,7 @@ public class SubscriptionWorkflowImpl implements SubscriptionWorkflow {
                     currentCharge, billingPeriodNumber
             );
 
-            Workflow.getLogger(this).info(String.format(
+            Workflow.getLogger(SubscriptionWorkflowImpl.class).info(String.format(
                     "Charged %s $%.2f for period %d [%s]",
                     customer.getEmail(), currentCharge, billingPeriodNumber, confirmationId));
 
@@ -160,12 +160,12 @@ public class SubscriptionWorkflowImpl implements SubscriptionWorkflow {
             activities.sendSubscriptionCancellationEmail(
                     customer.getEmail(), customer.getCompanyName());
             status = "CANCELLED";
-            Workflow.getLogger(this).info("Cancelled during billing: " + customer.getEmail());
+            Workflow.getLogger(SubscriptionWorkflowImpl.class).info("Cancelled during billing: " + customer.getEmail());
         } else {
             activities.sendSubscriptionEndedEmail(
                     customer.getEmail(), customer.getCompanyName());
             status = "COMPLETED";
-            Workflow.getLogger(this).info("Subscription completed: " + customer.getEmail());
+            Workflow.getLogger(SubscriptionWorkflowImpl.class).info("Subscription completed: " + customer.getEmail());
         }
 
         // ── ContinueAsNew — the production pattern for long-running workflows ─
@@ -194,7 +194,7 @@ public class SubscriptionWorkflowImpl implements SubscriptionWorkflow {
     public void cancelSubscription() {
         // This can arrive while the workflow is sleeping, mid-activity, or between steps.
         // Temporal queues it and delivers it safely. The workflow reacts on next wake-up.
-        Workflow.getLogger(this).info("Cancel signal received");
+        Workflow.getLogger(SubscriptionWorkflowImpl.class).info("Cancel signal received");
         this.cancelled = true;
         this.status    = "CANCELLED";
     }
@@ -203,7 +203,7 @@ public class SubscriptionWorkflowImpl implements SubscriptionWorkflow {
     public void updateBillingCharge(double newAmount) {
         // The charge for the NEXT billing cycle. The current one (if running) completes
         // at the old rate — correct and expected billing behavior.
-        Workflow.getLogger(this).info(String.format(
+        Workflow.getLogger(SubscriptionWorkflowImpl.class).info(String.format(
                 "Billing charge updated: $%.2f → $%.2f", currentCharge, newAmount));
         this.currentCharge = newAmount;
     }
