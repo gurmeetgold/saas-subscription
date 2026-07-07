@@ -2,24 +2,26 @@ package io.temporal.subscription.starter;
 
 import io.temporal.client.WorkflowClient;
 import io.temporal.serviceclient.WorkflowServiceStubs;
+import io.temporal.subscription.model.BillingInfo;
 import io.temporal.subscription.workflow.SubscriptionWorkflow;
 
-import java.util.logging.Logger;
-
 /**
- * UpdateBillingStarter — sends an updateBillingCharge Signal to a running workflow.
+ * UpdateBillingStarter — sends an updateBillingCharge Signal to a running workflow,
+ * then immediately queries the workflow to prove the change took effect.
  *
- * The next billing cycle will use the new amount.
- * No DB migration. No redeployment. Just a signal.
+ * HOW THIS PROVES THE POINT TO THE PANEL:
+ *   - Queries BEFORE the signal  → shows $149.00
+ *   - Sends the signal           → workflow state updated instantly
+ *   - Queries AFTER the signal   → shows $200.00
  *
- * Usage:
- *   mvn exec:java -Dexec.mainClass="...UpdateBillingStarter" -Dexec.args="C-002 200.0"
+ * No database was touched. No service restarted. The workflow updated its own
+ * internal state in response to the signal, and the query reads it back live.
+ *
+ * Program arguments: C-002  200.0
  */
 public class UpdateBillingStarter {
 
-    private static final Logger log = Logger.getLogger(UpdateBillingStarter.class.getName());
-
-    public static void main(String[] args) {
+    public static void main(String[] args) throws InterruptedException {
         String customerId = (args.length > 0) ? args[0] : "C-002";
         double newAmount  = (args.length > 1) ? Double.parseDouble(args[1]) : 200.0;
         String workflowId = "subscription-" + customerId;
@@ -30,8 +32,44 @@ public class UpdateBillingStarter {
         SubscriptionWorkflow workflow = client.newWorkflowStub(
                 SubscriptionWorkflow.class, workflowId);
 
-        log.info(String.format("Sending updateBillingCharge($%.2f) to %s", newAmount, workflowId));
+        // ── Step 1: Query BEFORE the signal ──────────────────────────────────
+        BillingInfo before = workflow.getBillingInfo();
+
+        System.out.println();
+        System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        System.out.println("  SIGNAL — updateBillingCharge");
+        System.out.println("  Workflow ID : " + workflowId);
+        System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        System.out.println();
+        System.out.printf("  BEFORE signal → current charge : $%.2f%n", before.getCurrentCharge());
+        System.out.println("  Status: " + before.getStatus()
+                + "  |  Billing period: " + before.getBillingPeriodNumber());
+
+        // ── Step 2: Send the signal ───────────────────────────────────────────
+        System.out.println();
+        System.out.printf("  Sending signal: updateBillingCharge($%.2f)...%n", newAmount);
         workflow.updateBillingCharge(newAmount);
-        log.info("Signal sent. Next billing cycle will use $" + newAmount);
+        System.out.println("  Signal delivered to running workflow.");
+
+        // Brief pause so the workflow thread processes the signal
+        Thread.sleep(500);
+
+        // ── Step 3: Query AFTER the signal ────────────────────────────────────
+        BillingInfo after = workflow.getBillingInfo();
+
+        System.out.println();
+        System.out.printf("  AFTER signal  → current charge : $%.2f%n", after.getCurrentCharge());
+        System.out.println();
+        System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        System.out.printf("  PROOF: charge changed $%.2f → $%.2f%n",
+                before.getCurrentCharge(), after.getCurrentCharge());
+        System.out.println("  No database update. No restart. No redeployment.");
+        System.out.println("  The workflow updated its own state from the signal.");
+        System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        System.out.println();
+        System.out.println("  See the signal event in the Web UI:");
+        System.out.println("  http://localhost:8233/namespaces/default/workflows/" + workflowId);
+        System.out.println("  Look for 'WorkflowExecutionSignaled' in the Event History.");
+        System.out.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     }
 }

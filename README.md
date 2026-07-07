@@ -1,247 +1,270 @@
-SaaS Subscription Billing — Temporalized
+# Temporalizing a SaaS Subscription Billing Pipeline
 
-Gurmeet Chhiber | Staff Developer Advocate, Enterprise — Take-Home Assignment
+---
 
+## The Scenario
 
-The Problem
+The subscription billing ran as three separate scripts sharing one database:
 
-At my previous enterprise SaaS company, subscription billing ran as three separate cron scripts sharing one database:
+- A **nightly cron** that expired free trials and moved customers to `ACTIVE`
+- A **monthly cron** that charged all active customers
+- A **web endpoint** that set a `cancellationFlag` column when a customer cancelled
 
+Three scripts. One database. Zero coordination. The failures were predictable and frequent:
 
-Script 1 — nightly cron that expired trials and moved customers to ACTIVE
-Script 2 — monthly cron that charged all ACTIVE customers
-Script 3 — web endpoint that set a cancellationFlag column
+| What went wrong | Why |
+|---|---|
+| Customer charged on day 1 of free trial | Trial cron and billing cron raced at midnight |
+| 499 customers charged twice | Billing cron crashed at customer #500, restarted from the top |
+| Cancelled customer charged anyway | Cancellation flag arrived after the loop already read that record |
+| 1,999 customers uncharged that month | One payment gateway timeout crashed the entire batch |
+| "What is Alice's current plan?" | `SELECT * FROM subscriptions WHERE id = ?` — stale, complex, drifted |
 
+This repo shows the problem and the Temporal solution, side by side, in working Java code.
 
-No coordination. No checkpoints. Painful failures every month:
+---
 
-FailureWhat happenedTrial cron + billing cron ran at midnightRace condition → customer charged twiceBilling cron crashed at customer #500 of 2000No checkpoint → restart → customers 1–499 double-chargedCustomer cancelled during a billing runFlag arrived too late → charge went through, manual refundOne payment gateway timeoutEntire batch failed — every customer after that one uncharged"What's Alice's subscription status?"SELECT * FROM subscriptions WHERE id = ? — complex, stale, drifted
+## What This Demonstrates
 
+| Temporal Feature | Where | What It Solves |
+|---|---|---|
+| `@WorkflowInterface` / `@WorkflowMethod` | `SubscriptionWorkflow.java` | Replaces the monthly billing cron |
+| `@ActivityInterface` / `@ActivityMethod` | `SubscriptionActivities.java` | Each external call — email, payment, notification |
+| `Workflow.sleep()` | `SubscriptionWorkflowImpl.java` | Durable timer — survives crashes, no cron needed |
+| `Workflow.await(duration, condition)` | `SubscriptionWorkflowImpl.java` | Sleeps until timer fires *or* cancel signal arrives |
+| `@SignalMethod` — cancel | `SubscriptionWorkflow.java` | Cancellation handled immediately at any point |
+| `@SignalMethod` — update billing | `SubscriptionWorkflow.java` | Change billing amount on a running subscription |
+| `@QueryMethod` | `SubscriptionWorkflow.java` | Read live state — replaces `SELECT * FROM DB` |
+| `RetryOptions` | `SubscriptionWorkflowImpl.java` | Per-customer retry — one failure never blocks others |
+| Single input object pattern | `Customer.java` | Add fields without breaking running executions |
+| `ContinueAsNew` (documented) | `SubscriptionWorkflowImpl.java` | Prevents event history overflow on long subscriptions |
 
-The Fix
+---
 
-One Temporal workflow per customer. Every subscription lifecycle — trial, billing loop, cancellation — lives in one place, with durable state, automatic retries, and clean signal handling.
+## Project Structure
 
-signup
-  └─► sendWelcomeEmail
-  └─► Workflow.sleep(14 days trial)   ← survives server crashes
-        │  [cancelSubscription Signal can arrive here]
-        │
-  └─► billing loop (up to maxBillingPeriods):
-        └─► chargeCustomer            ← retries automatically on failure
-        └─► sendPaymentEmail
-        └─► Workflow.sleep(30 days)   ← durable, survives crashes
-              │  [cancelSubscription Signal can arrive here]
-              │  [updateBillingCharge Signal can arrive here]
-
-
-What this demo shows
-
-Temporal featureWhereWhy it mattersWorkflow.sleep()SubscriptionWorkflowImplDurable timer — survives crashes. NOT Thread.sleep().Workflow.await()SubscriptionWorkflowImplWakes up early when a Signal arrives during sleep@SignalMethod cancelSubscriptionWorkflowCustomer cancels at any point — handled immediately@SignalMethod updateSubscriptionWorkflowChange billing amount on a running subscription@QueryMethodSubscriptionWorkflowRead live state — no database neededPer-activity retryActivityOptionsOne payment failure retries that customer onlySingle input objectCustomer.javaBest practice — add fields without breaking running workflowsContinueAsNew (documented)SubscriptionWorkflowImplPrevents event history overflow on long subscriptions
-
-
-Project layout
-
+```
 saas-subscription/
-├── before/
-│   └── src/main/java/io/temporal/subscription/
-│       └── SubscriptionBillingSystem.java   ← 3 fragile cron scripts
 │
-├── after/
+├── before/                              # The fragile cron approach
 │   └── src/main/java/io/temporal/subscription/
+│       └── SubscriptionBillingSystem.java   ← three scripts, one class, zero checkpoints
+│
+├── after/                               # The Temporal solution
+│   └── src/main/java/io/temporal/subscription/
+│       │
 │       ├── model/
-│       │   ├── Customer.java               ← workflow input
-│       │   └── BillingInfo.java            ← query response
+│       │   ├── Customer.java            ← workflow input (single object pattern)
+│       │   └── BillingInfo.java         ← query response
+│       │
 │       ├── activities/
-│       │   ├── SubscriptionActivities.java ← activity interface
-│       │   └── SubscriptionActivitiesImpl.java
+│       │   ├── SubscriptionActivities.java      ← activity interface
+│       │   └── SubscriptionActivitiesImpl.java  ← email, payment, notification
+│       │
 │       ├── workflow/
-│       │   ├── SubscriptionWorkflow.java   ← workflow interface (Signal + Query)
-│       │   └── SubscriptionWorkflowImpl.java ← orchestration logic
+│       │   ├── SubscriptionWorkflow.java        ← interface: @WorkflowMethod, @SignalMethod, @QueryMethod
+│       │   └── SubscriptionWorkflowImpl.java    ← orchestration: sleep, await, retry, signals
+│       │
 │       ├── worker/
-│       │   └── SubscriptionWorker.java     ← registers and polls
+│       │   └── SubscriptionWorker.java          ← registers workflow + activities, polls task queue
+│       │
 │       └── starter/
-│           ├── SubscriptionStarter.java    ← starts 3 subscriptions
-│           ├── CancelSubscriptionStarter.java
-│           ├── UpdateBillingStarter.java
-│           └── QueryBillingStarter.java
+│           ├── SubscriptionStarter.java         ← starts 3 subscriptions (one per customer)
+│           ├── CancelSubscriptionStarter.java   ← sends cancel signal, shows before/after status
+│           ├── UpdateBillingStarter.java        ← sends update signal, shows before/after charge
+│           └── QueryBillingStarter.java         ← reads live billing state from workflow
 │
 └── README.md
+```
 
+---
 
-Setup — new MacBook (start here)
+## How the Subscription Lifecycle Works
 
-Step 1 — Install Homebrew (Mac package manager)
+```
+Customer signs up
+      │
+      ▼
+[Activity]  sendWelcomeEmail()
+      │
+      ▼
+[Workflow.await(10 min trial, () -> cancelled)]
+      │                    │
+      │                    └── cancelSubscription() Signal arrives
+      │                         → sendTrialCancellationEmail()
+      │                         → workflow ends cleanly
+      ▼
+[Billing loop — repeats up to maxBillingPeriods times]
+      │
+      ├── [Activity]  chargeCustomer()        ← retries automatically on failure
+      ├── [Activity]  sendPaymentEmail()
+      │
+      └── [Workflow.await(20 min billing period, () -> cancelled)]
+                │                    │
+                │                    └── cancelSubscription() Signal
+                │                         → sendSubscriptionCancellationEmail()
+                │                         → workflow ends cleanly
+                ▼
+           next billing cycle...
+      │
+      ▼
+[Activity]  sendSubscriptionEndedEmail()
+```
 
-bash/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+**Key design decisions:**
 
-Step 2 — Install Java 17
+`Workflow.await()` is used instead of a plain `Workflow.sleep()`. This means the workflow wakes early if a cancel signal arrives during the trial or billing sleep — no polling, no busy loop. One method handles both the timer and the signal.
 
-bashbrew install openjdk@17
-echo 'export PATH="/opt/homebrew/opt/openjdk@17/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-java -version   # should print: openjdk 17...
+Each customer runs as an **independent workflow execution**. A payment failure for C-002 does not affect C-001 or C-003. Their event histories, retry queues, and timers are completely separate.
 
-Step 3 — Install Maven
+---
 
-bashbrew install maven
-mvn -version    # should print: Apache Maven 3...
+---
 
-Step 4 — Install Temporal CLI
+## Running the Demo
 
-bashbrew install temporal
-temporal version  # should print: temporal version...
+### Step 1 — Start the Temporal dev server
 
-Step 5 — Clone this repo
+```bash
+temporal server start-dev
+```
 
-bashgit clone https://github.com/YOUR_USERNAME/saas-subscription-temporal.git
-cd saas-subscription-temporal
+Open **[http://localhost:8233](http://localhost:8233)** in your browser. Keep this running throughout.
 
+### Step 2 — Compile
+```
 
-IntelliJ IDEA setup (do this once)
+### Step 3 — Start the Worker
 
-Step 1 — Download IntelliJ IDEA Community (free)
+```bash
+mvn exec:java -Dexec.mainClass="io.temporal.subscription.worker.SubscriptionWorker"
+```
 
-Go to https://www.jetbrains.com/idea/download → scroll to Community Edition → Download.
-Open the .dmg, drag IntelliJ to your Applications folder, open it.
-
-Step 2 — Open the project
-
-
-Click Open
-Navigate to Downloads → saas-subscription → after
-Select the after folder → click Open
-Click Trust Project
-Wait ~30 seconds — IntelliJ downloads all dependencies automatically
-
-
-Step 3 — Fix the keymap (so shortcuts work)
-
-Top menu → IntelliJ IDEA → Settings → Keymap → set the dropdown to macOS → click OK.
-
-Step 4 — Verify it compiles
-
-Top menu → Build → Build Project.
-Bottom bar should say "Build: completed successfully" with no red errors.
-If you see errors in the Problems tab, click any error to jump straight to that line.
-
-
-Run the demo
-
-You need one Terminal window (for the Temporal server) and IntelliJ for everything else.
-
-Step 1 — Start the Temporal dev server (Terminal)
-
-Open Terminal and run:
-
-bashtemporal server start-dev
-
-Leave this running the whole time.
-Open http://localhost:8233 in your browser now — this is the Web UI where you watch workflows run live.
-
-Step 2 — Create Run Configurations in IntelliJ
-
-IntelliJ uses Run Configurations instead of terminal commands. You set them up once, then run anything with one click.
-
-How to create a Run Configuration — every field explained:
-
-
-Top menu → Run → Edit Configurations
-Click the + button (top left) → choose Application
-You will see a form with several fields. Fill them in exactly as follows:
-
-
-FieldWhat to enterNotesNamee.g. WorkerJust a label — you choose thisModulesaas-subscription-afterSelect from the dropdown — this is the only module in the projectMain classe.g. io.temporal.subscription.worker.SubscriptionWorkerClick the … button to browse, or type it directlyProgram argumentsleave blank (or see table below)Only needed for 3 of the 5 configurationsEverything elseleave as defaultDo not change JVM options or working directory
-
-
-Click OK
-
-
-Repeat the steps above for each of these 5 configurations:
-
-NameMain classProgram argumentsWorkerio.temporal.subscription.worker.SubscriptionWorker(leave blank)Start Subscriptionsio.temporal.subscription.starter.SubscriptionStarter(leave blank)Cancel C-003io.temporal.subscription.starter.CancelSubscriptionStarterC-003Update Billing C-002io.temporal.subscription.starter.UpdateBillingStarterC-002 200.0Query C-001io.temporal.subscription.starter.QueryBillingStarterC-001
-
-Step 3 — Run the Worker
-
-In IntelliJ, top right dropdown → select Worker → click the green Run ▶ button.
-The Run panel at the bottom opens and shows:
-
+You will see:
+```
 Worker started — polling: 'subscription-task-queue'
+```
 
-Leave this running. Do not stop it.
+### Step 4 — Start 3 subscription workflows
 
-Step 4 — Start 3 subscription workflows
+Open a second terminal:
 
-Top right dropdown → select Start Subscriptions → click Run ▶.
-Switch to your browser at http://localhost:8233 — you will see 3 workflows appear in Running state.
+```bash
+cd after
+mvn exec:java -Dexec.mainClass="io.temporal.subscription.starter.SubscriptionStarter"
+```
 
-Step 5 — Interact with running workflows
+Three workflows start — one per customer. Switch to the Web UI to watch them.
 
-Each of these runs in a separate tab in IntelliJ's Run panel — they do not stop the Worker.
+ trial period = 10 minutes, billing period = 20 minutes.
 
-Cancel C-003 mid-trial — you have 60 seconds after starting workflows:
-Dropdown → Cancel C-003 → Run ▶
-Watch the Web UI — C-003's workflow transitions to Completed immediately with a trial cancellation email. C-001 and C-002 keep running — completely unaffected.
+---
 
-Update billing amount for C-002 — run any time during the 90-second billing sleep:
-Dropdown → Update Billing C-002 → Run ▶
-The next billing cycle for C-002 will charge $200 instead of $149. No database update. No redeployment.
-
-Query live billing state for C-001 — run any time:
-Dropdown → Query C-001 → Run ▶
-The Run panel shows current status, billing period, and charge amount — read directly from the running workflow. No database query involved.
+## Interacting with Running Workflows
 
 
-If you see "workflow already exists" or "already completed" errors
+### Cancel C-003 during trial
 
-This happens when you re-run the demo and old workflow IDs still exist in Temporal.
-Fix: stop the Temporal server in Terminal (Ctrl+C), then restart it:
+```bash
+cd after
+mvn exec:java -Dexec.mainClass="io.temporal.subscription.starter.CancelSubscriptionStarter" \
+  -Dexec.args="C-003"
+```
 
-bashtemporal server start-dev
+Expected output:
+```
+BEFORE signal → status : TRIAL
+Sending signal: cancelSubscription...
+AFTER signal  → status : CANCELLED
 
-Restarting the dev server wipes all workflow history and gives you a clean slate.
-Then restart the Worker in IntelliJ and run Start Subscriptions again.
+PROOF: workflow cancelled immediately on signal.
+Cancelled during TRIAL → trial cancellation email sent.
+```
 
+C-001 and C-002 continue running, unaffected.
 
-If you see sun.misc.Unsafe WARNING lines
+### Update billing amount for C-002
 
-WARNING: sun.misc.Unsafe::objectFieldOffset has been called...
+```bash
+cd after
+mvn exec:java -Dexec.mainClass="io.temporal.subscription.starter.UpdateBillingStarter" \
+  -Dexec.args="C-002 200.0"
+```
 
-This is harmless. It comes from an internal gRPC library that Temporal uses. It does not affect the demo in any way — ignore it completely.
+Expected output:
+```
+BEFORE signal → current charge : $149.00
+Sending signal: updateBillingCharge($200.00)...
+AFTER signal  → current charge : $200.00
 
+PROOF: charge changed $149.00 → $200.00
+No database update. No restart. No redeployment.
+```
 
-The live demo moment that lands hardest
+### Query live billing state for C-001
 
-After starting the 3 workflows, wait 10 seconds (they are sleeping in the 60-second trial period).
-Stop the Worker: click the red Stop ■ button in IntelliJ's Run panel.
-Switch to the Web UI — the 3 workflows show as Running but frozen.
-Restart the Worker: dropdown → Worker → Run ▶.
-Watch the workflows resume from where they stopped — the trial timer picks up mid-count, not from zero.
+```bash
+cd after
+mvn exec:java -Dexec.mainClass="io.temporal.subscription.starter.QueryBillingStarter" \
+  -Dexec.args="C-001"
+```
 
-That is durable execution. That is the entire point of Temporal.
+Expected output:
+```
+QUERY — reading live state from workflow
+No database. No REST call. Asked the workflow directly.
+  Status        : ACTIVE
+  Billing period: 1
+  Current charge: $99.00
+```
 
+---
 
-Key concepts to explain in the presentation
+## The Durable Execution Demo
 
-Why Workflow.sleep() and not Thread.sleep()?
+1. Confirm 3 workflows are `Running` in the Web UI
+2. **Kill the Worker** — stop the terminal running `SubscriptionWorker` (`Ctrl+C`)
+3. Check the Web UI — workflows still show `Running`. The trial timers are still counting in Temporal's event store. The Worker process is gone. The state is not.
+4. **Restart the Worker** — run `SubscriptionWorker` again
+5. Workflows resume from exactly where they stopped. The trial timers pick up mid-count.
 
-Thread.sleep() blocks a JVM thread and is lost when the server restarts. Workflow.sleep() is persisted to Temporal's event history as a timer. If the server crashes on day 13 of a 14-day trial, when it comes back up the timer resumes from day 13, not day 0.
+This is durable execution. The workflow code is stateless. The state lives in Temporal.
 
-Why Workflow.await() instead of checking a flag in a loop?
+---
 
-Workflow.await(duration, condition) does two things at once: it sleeps until the duration expires or wakes up early if the condition becomes true (e.g. cancelled == true). This is how the cancel Signal interrupts the trial sleep cleanly — no polling, no busy loop.
+## Running the BEFORE Version
 
-Signals vs Queries
+```bash
+cd before
+mvn compile -q exec:java
+```
 
-Signals (@SignalMethod) send data INTO a running workflow. Fire-and-forget. Temporal queues them and delivers them on next wake-up. Used for cancel and billing update.
+The before version simulates the three-script approach. `chargeCustomer()` has a 10% random failure rate — the billing batch will crash after partially completing. On restart, customers already processed would be charged again. There is no checkpoint.
 
-Queries (@QueryMethod) read state OUT of a running workflow. Synchronous, instant. Not recorded in event history. Replaces a database SELECT.
+```
+Exception in thread "main" java.lang.RuntimeException: Billing batch failed — manual fix required
+```
 
-What is ContinueAsNew and why does it matter?
+---
 
-Temporal stores every activity call, signal, and timer as an event. There is a soft limit of ~50,000 events per workflow execution. For a subscription that runs for years with frequent signals, you can approach this limit. Workflow.continueAsNew() starts a fresh execution with a clean history, carrying forward whatever state you need. It is the production pattern for indefinitely long workflows.
+## If You Need to Reset
 
+Restarting the Temporal dev server clears all workflow history and gives you a clean slate:
 
-Temporal SDK version
+```bash
+# Stop the server (Ctrl+C), then:
+temporal server start-dev
+```
 
-1.27.0 — latest stable
+---
+
+## Temporal SDK
+
+`io.temporal:temporal-sdk:1.27.0`
+
+Documentation: [docs.temporal.io/develop/java](https://docs.temporal.io/develop/java)  
+Java samples: [github.com/temporalio/samples-java](https://github.com/temporalio/samples-java)
+
+---
+
+*All external calls (email, payment) are simulated with realistic failure rates to demonstrate retry behavior.*

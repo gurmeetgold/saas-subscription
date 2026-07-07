@@ -19,12 +19,12 @@ import java.util.logging.Logger;
  * each customer's subscription is completely isolated from every other.
  *
  * Timings (demo-friendly):
- *   Trial period   = 60 seconds  (production: 14 days)
- *   Billing period = 90 seconds  (production: 30 days)
+ *   Trial period   = 10 minutes / 600 seconds  (production: 14 days)
+ *   Billing period = 20 minutes / 1200 seconds (production: 30 days)
  *   Max cycles     = 3
  *
- * This gives you ~60 seconds to cancel C-003 during trial,
- * and ~90 seconds between billing cycles to send signals and queries.
+ * This gives you 10 minutes to cancel C-003 during trial,
+ * and 20 minutes between billing cycles to send signals and queries.
  *
  * Re-running: if workflows already exist from a previous run, this prints
  * a reminder to reset Temporal. See README for the reset command.
@@ -41,11 +41,11 @@ public class SubscriptionStarter {
     // Fixed IDs — simple, stable, match the cancel/query/update configs exactly.
     private static final List<Customer> DEMO_CUSTOMERS = Arrays.asList(
         new Customer("C-001", "alice@acme.com",    "Acme Corp",
-                     60, 90, 3, 99.0),   // 60s trial, 90s billing, 3 cycles
+                     600, 1200, 3, 99.0),   // 10 min trial, 20 min billing, 3 cycles
         new Customer("C-002", "bob@globex.com",    "Globex Inc",
-                     60, 90, 3, 149.0),
+                     600, 1200, 3, 149.0),
         new Customer("C-003", "carol@initech.com", "Initech",
-                     60, 90, 3, 49.0)    // cancel this one during the 60s trial window
+                     600, 1200, 3, 49.0)    // cancel this one during the 10 min trial window
     );
 
     public static void main(String[] args) {
@@ -73,7 +73,8 @@ public class SubscriptionStarter {
 
         log.info("====================================================");
         log.info("Workflows started. Watch live: http://localhost:8233");
-        log.info("You have 60 seconds to run Cancel C-003.");
+        log.info("You have 10 minutes to cancel C-003 during the trial.");
+        log.info("You have 20 minutes between billing cycles for signals and queries.");
         log.info("If you see 'already exists' errors: restart temporal server start-dev");
         log.info("====================================================");
     }
