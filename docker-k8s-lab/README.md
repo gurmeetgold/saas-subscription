@@ -1,32 +1,52 @@
-# Docker + Kubernetes Hands-On Interview Lab
+# Docker + Kubernetes Hands-On Interview Lab — Java Edition
 
-This lab is designed to make the core Docker and Kubernetes concepts *muscle memory* before a technical interview.
+This lab is designed for interview preparation using a technology stack you already know: **Java 21 + Spring Boot + Redis**.
 
-You will build and run a tiny SaaS-style web API. The app returns its hostname and increments a visit counter stored in Redis. That simple design lets you practice images, containers, networking, environment variables, volumes, health checks, Compose, Kubernetes Pods, Deployments, Services, ConfigMaps, Secrets, probes, scaling, rollouts, logs, exec, service discovery and failure recovery.
+The goal is not merely to memorize Docker and Kubernetes terminology. You will build, run, break, inspect, scale and recover a small application so the concepts become practical.
 
 ## Architecture
 
 ```text
 Browser / curl
-    |
-    v
-Web API (Flask/Gunicorn)  --->  Redis
-    |                           |
-    |                           +-- visit counter
-    +-- hostname shows which replica answered
+      |
+      v
+Spring Boot API  --->  Redis
+      |                  |
+      |                  +-- persistent visit counter
+      +-- hostname shows which container/Pod answered
 ```
 
-In Docker Compose, `app` and `redis` run as separate containers on the Compose network.
+The API exposes:
 
-In Kubernetes, a `web` Deployment runs 3 Pods. A ClusterIP Service gives them one stable virtual endpoint. Redis runs in another Deployment and is reached through the Kubernetes Service named `redis`.
+- `GET /` — increments a Redis counter and returns environment, hostname and visit count.
+- `GET /health` — simple liveness endpoint.
+- `GET /ready` — returns readiness based on Redis connectivity.
+
+This deliberately simple application lets you practice:
+
+- Dockerfile and image layers
+- containers and port publishing
+- environment variables
+- Docker networking and DNS
+- Docker Compose
+- volumes and persistence
+- multi-stage Java builds
+- Kubernetes Pods, Deployments and ReplicaSets
+- Services and service discovery
+- ConfigMaps and Secrets
+- liveness/readiness probes
+- resource requests and limits
+- scaling and self-healing
+- rolling updates and rollback
+- troubleshooting `ImagePullBackOff`, `CrashLoopBackOff`, bad configuration and broken dependencies
 
 ---
 
 # 1. Prerequisites
 
-## Recommended easiest setup: Docker Desktop
+Recommended: Docker Desktop with Kubernetes enabled.
 
-Install Docker Desktop and make sure these commands work:
+Verify:
 
 ```bash
 docker --version
@@ -34,15 +54,7 @@ docker compose version
 kubectl version --client
 ```
 
-For the Kubernetes section, enable Kubernetes in Docker Desktop:
-
-1. Open Docker Desktop.
-2. Open Settings.
-3. Open Kubernetes.
-4. Enable Kubernetes.
-5. Wait until Kubernetes reports Running.
-
-Then verify:
+For Kubernetes:
 
 ```bash
 kubectl config current-context
@@ -51,11 +63,18 @@ kubectl get nodes
 
 You should see a local node in `Ready` state.
 
-> Alternative: `kind` or `minikube` also work. Docker Desktop is easiest for this interview lab because the Docker image you build locally can be used directly by its local Kubernetes cluster.
+Java and Maven are useful for reading/running the app locally, but **not required to build the Docker image**, because Maven and the JDK run inside the Docker build stage.
+
+If installed locally, verify:
+
+```bash
+java -version
+mvn -version
+```
 
 ---
 
-# 2. Clone the branch
+# 2. Clone the learning branch
 
 ```bash
 git clone https://github.com/gurmeetgold/saas-subscription.git
@@ -64,83 +83,123 @@ git checkout docker-k8s-learning-lab
 cd docker-k8s-lab
 ```
 
-Check the files:
-
-```bash
-ls
-```
-
-You should see:
+Important files:
 
 ```text
-app.py
-requirements.txt
+pom.xml
 Dockerfile
 docker-compose.yml
-k8s/
-README.md
+src/main/java/com/gurmeet/dockerk8slab/
+  DockerK8sLabApplication.java
+  LabController.java
+src/main/resources/application.properties
+k8s/all.yaml
 ```
 
 ---
 
-# 3. Understand the application before containerizing it
+# 3. Understand the Java app first
 
-The Flask application has three endpoints:
+Open `LabController.java`.
 
-- `/` - increments a Redis counter and returns application metadata.
-- `/health` - basic liveness endpoint.
-- `/ready` - readiness endpoint that verifies Redis connectivity.
+The important idea is that application code does **not** hard-code environment-specific addresses. Redis configuration comes from environment variables:
 
-Important environment variables:
+```text
+REDIS_HOST
+REDIS_PORT
+APP_ENV
+APP_MESSAGE
+```
 
-- `REDIS_HOST`
-- `REDIS_PORT`
-- `APP_ENV`
-- `APP_MESSAGE`
+Spring maps Redis configuration in `application.properties`:
 
-The app deliberately gets configuration from environment variables because containers should be portable. The image stays the same while environment-specific configuration changes outside the image.
+```properties
+spring.data.redis.host=${REDIS_HOST:localhost}
+spring.data.redis.port=${REDIS_PORT:6379}
+```
 
-Interview concept:
+Interview point:
 
-> **Image = immutable application package. Configuration = injected at runtime.**
+> Build the application once, then inject environment-specific configuration at runtime. The same image should move between development, test and production.
 
 ---
 
-# 4. Build your first Docker image
+# 4. Optional: run Java directly
 
-From `docker-k8s-lab`:
+If you have Maven installed, start Redis first:
+
+```bash
+docker run -d --name lab-redis -p 6379:6379 redis:7-alpine
+```
+
+Then:
+
+```bash
+mvn spring-boot:run
+```
+
+Test:
+
+```bash
+curl http://localhost:5000/
+curl http://localhost:5000/health
+curl http://localhost:5000/ready
+```
+
+Clean up:
+
+```bash
+docker rm -f lab-redis
+```
+
+This proves the application is simply a Java process before Docker enters the picture.
+
+---
+
+# 5. Build your first Docker image
 
 ```bash
 docker build -t docker-k8s-lab:local .
 ```
 
-What Docker does:
+The Dockerfile uses a **multi-stage build**.
 
-1. Reads the `Dockerfile`.
-2. Starts from `python:3.12-slim`.
-3. Creates `/app` as the working directory.
-4. Copies `requirements.txt`.
-5. Installs Python dependencies into an image layer.
-6. Copies `app.py`.
-7. Records port 5000 as documentation with `EXPOSE`.
-8. Adds a container health check.
-9. Defines Gunicorn as the default process.
+Stage 1:
 
-Inspect it:
+```text
+maven:3.9.9-eclipse-temurin-21
+```
+
+It downloads dependencies and runs Maven package.
+
+Stage 2:
+
+```text
+eclipse-temurin:21-jre
+```
+
+Only the packaged JAR is copied into the runtime image.
+
+Why this matters:
+
+> Build tools such as Maven and the full JDK are useful during compilation but unnecessary at runtime. Multi-stage builds reduce image size and attack surface.
+
+Inspect the image:
 
 ```bash
 docker images docker-k8s-lab
+docker history docker-k8s-lab:local
 ```
 
-Useful interview explanation:
+Interview-ready definitions:
 
-> A Docker image is a read-only template composed of filesystem layers plus metadata. A container is a running instance of that image with a writable container layer, process isolation, networking and resource controls.
+- **Dockerfile**: instructions used to build an image.
+- **Image**: immutable application package made of filesystem layers plus metadata.
+- **Container**: a running instance of an image with an isolated process, filesystem view and networking.
 
 ---
 
-# 5. Run one container without Redis
-
-Try this deliberately incomplete setup:
+# 6. Run the Java container without Redis — intentionally break it
 
 ```bash
 docker run --rm -p 5000:5000 docker-k8s-lab:local
@@ -149,40 +208,62 @@ docker run --rm -p 5000:5000 docker-k8s-lab:local
 In another terminal:
 
 ```bash
+curl http://localhost:5000/health
+curl http://localhost:5000/ready
 curl http://localhost:5000/
 ```
 
-The app should respond, but Redis will report an error because no Redis service exists.
+Expected concept:
 
-This is useful. It proves:
+- `/health` can succeed because the Java process is alive.
+- `/ready` should fail because Redis is unavailable.
+- `/` needs Redis and should return an error.
 
-- The web container itself is healthy.
-- The application has an external dependency.
-- Containers should normally communicate through container networking rather than `localhost`.
+This demonstrates a crucial distinction:
 
-Why not `localhost` for Redis?
-
-Inside a container, `localhost` means **that same container**, not your laptop and not another container.
+> A process can be **alive** without being **ready to serve its intended workload**.
 
 Stop with `Ctrl+C`.
 
 ---
 
-# 6. Run a multi-container application with Docker Compose
+# 7. Why `localhost` is a common container mistake
 
-Now use Compose:
+Start Redis as another container:
+
+```bash
+docker run -d --name redis redis:7-alpine
+```
+
+If the Java container uses `REDIS_HOST=localhost`, it still cannot reach that Redis container.
+
+Why?
+
+Inside the Java container:
+
+```text
+localhost = Java container itself
+```
+
+It does **not** mean another container and it does not mean your laptop.
+
+This is one of the most common interview questions around container networking.
+
+Remove Redis:
+
+```bash
+docker rm -f redis
+```
+
+---
+
+# 8. Run the complete application with Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-Open another terminal:
-
-```bash
-curl http://localhost:5000/
-```
-
-Call it several times:
+In another terminal:
 
 ```bash
 curl http://localhost:5000/
@@ -190,56 +271,40 @@ curl http://localhost:5000/
 curl http://localhost:5000/
 ```
 
-The `visits` value should increase.
+The visit count should increase.
 
-## What Compose created
+Inspect:
 
 ```bash
 docker compose ps
+docker compose logs app
+docker compose logs redis
 ```
 
-You should see two services:
+Why does the app connect using `REDIS_HOST=redis`?
 
-- `app`
-- `redis`
+Docker Compose creates a network and supplies DNS-based service discovery. `redis` is the Compose **service name**.
 
-Docker Compose creates a private network. The app connects to Redis using hostname `redis` because Compose provides DNS-based service discovery using the service name.
+Interview line:
 
-Inspect networks:
-
-```bash
-docker network ls
-docker compose exec app getent hosts redis
-```
-
-Interview concept:
-
-> Containers communicate by network and DNS name. Avoid hard-coded IP addresses because container IPs are ephemeral.
+> Containers should normally discover each other using stable DNS/service names rather than hard-coded container IP addresses.
 
 ---
 
-# 7. Learn container logs and exec
+# 9. Get inside containers
 
-View logs:
-
-```bash
-docker compose logs app
-docker compose logs redis
-docker compose logs -f app
-```
-
-Enter the running app container:
+Enter the Java application container:
 
 ```bash
 docker compose exec app sh
 ```
 
-Inside the container:
+Try:
 
 ```bash
 pwd
 ls
-python --version
+java -version
 env | sort
 exit
 ```
@@ -258,23 +323,21 @@ GET visits
 EXIT
 ```
 
-Interview concept:
+Important:
 
-> `docker exec` does not start another container. It launches another process inside an already-running container.
+> `docker exec` starts an additional process inside an existing container. It does not create another container.
 
 ---
 
-# 8. Learn volumes and persistence
+# 10. Learn volumes and persistence
 
-The Compose file uses a named volume called `redis-data`.
-
-List volumes:
+The Compose file uses the named volume `redis-data`.
 
 ```bash
 docker volume ls
 ```
 
-Stop containers but keep the volume:
+Stop/remove containers but keep the volume:
 
 ```bash
 docker compose down
@@ -287,374 +350,302 @@ docker compose up -d
 curl http://localhost:5000/
 ```
 
-The visit count should continue because the Redis data survived container deletion.
+The counter should continue.
 
 Now remove the volume too:
 
 ```bash
 docker compose down -v
-```
-
-Start again:
-
-```bash
 docker compose up -d
 curl http://localhost:5000/
 ```
 
-The counter starts over.
+The counter starts from the beginning.
 
-Interview distinction:
+Know these distinctions:
 
-- Container filesystem: disposable.
-- Named volume: lifecycle independent from the container.
-- Bind mount: maps a specific host path into a container.
+- container writable layer = disposable with the container
+- named volume = Docker-managed persistent data
+- bind mount = host path mounted into a container
 
 ---
 
-# 9. Learn image layers and build cache
+# 11. Understand Docker build caching
 
-Run:
+The Dockerfile copies `pom.xml` before Java source code:
 
-```bash
-docker history docker-k8s-lab:local
+```dockerfile
+COPY pom.xml .
+RUN mvn -q -DskipTests dependency:go-offline
+COPY src ./src
 ```
-
-Notice `requirements.txt` is copied before `app.py`.
 
 Why?
 
-Docker can reuse the expensive dependency-install layer when only application source code changes.
+Dependencies change less frequently than application source code. Docker can reuse the Maven dependency layer when only your Java code changes.
 
-Try changing only `APP_MESSAGE` in the Compose file and rebuild. Dependency installation should remain cached.
+Run the build twice:
 
-Interview concept:
+```bash
+docker build -t docker-k8s-lab:local .
+docker build -t docker-k8s-lab:local .
+```
 
-> Order Dockerfile steps from least frequently changed to most frequently changed when practical so the build cache stays effective.
+Watch for cached build steps.
+
+Interview point:
+
+> Dockerfile ordering affects cache efficiency and therefore CI build speed.
 
 ---
 
-# 10. Learn tags
-
-Tag the same image:
+# 12. Image tags
 
 ```bash
 docker tag docker-k8s-lab:local docker-k8s-lab:v1
-```
-
-Inspect:
-
-```bash
 docker images docker-k8s-lab
 ```
 
-Both tags can reference the same image ID.
+A tag is a friendly reference to an image. Multiple tags can reference the same underlying image.
 
-Interview concept:
-
-> A tag is a human-friendly pointer to an image manifest. It is not the image itself.
-
-For production, prefer immutable version tags or digests rather than relying only on `latest`.
+For production, immutable version tags or image digests are safer than depending only on `latest`.
 
 ---
 
-# 11. Container vs virtual machine - interview-ready explanation
+# 13. Container versus virtual machine
 
-A VM virtualizes hardware and typically runs a complete guest operating system with its own kernel.
+Interview-ready explanation:
 
-A container virtualizes at the operating-system level. Linux containers normally share the host kernel while isolating processes using kernel mechanisms such as namespaces and controlling resources using cgroups.
-
-That is why containers generally start faster and consume fewer resources than full VMs.
+> A VM virtualizes hardware and normally runs a complete guest operating system with its own kernel. Linux containers isolate application processes at the operating-system level and normally share the host kernel. Namespaces provide isolation and cgroups govern resources, so containers are generally faster to start and lighter than full VMs.
 
 Important nuance:
 
-> Containers are isolated processes, not tiny virtual machines.
+> A container is not simply a lightweight VM; it is primarily an isolated process environment.
 
-Docker Desktop itself uses virtualization on macOS and Windows because Linux containers require a Linux kernel.
+Docker Desktop on Windows/macOS uses virtualization underneath because Linux containers need a Linux kernel.
 
 ---
 
-# 12. Move from Docker to Kubernetes
+# 14. Move from Docker to Kubernetes
 
-Docker solves packaging and local container execution very well.
+Docker gives you excellent tooling for packaging/building/running containerized applications.
 
 Kubernetes solves orchestration problems such as:
 
 - desired replica count
-- automatic restart/rescheduling
-- service discovery
-- load distribution across Pods
+- scheduling
+- self-healing
+- stable service discovery
+- traffic distribution
 - rolling updates
 - configuration injection
-- health-based traffic decisions
-- scheduling across nodes
-- declarative desired state
+- health-aware routing
+- resource allocation
 
-Kubernetes does **not** "manage Docker images". More precisely:
+Precise interview wording:
 
-> Kubernetes schedules and manages containerized workloads. Nodes run containers through a CRI-compatible container runtime such as containerd. Docker images use OCI-compatible image formats that Kubernetes runtimes can pull and run.
+> Kubernetes orchestrates containerized workloads. Kubernetes nodes use a CRI-compatible runtime, commonly containerd. Kubernetes does not require Docker Engine, although OCI-compatible images built with Docker can be run by Kubernetes runtimes.
 
-This distinction is worth knowing in a Docker interview.
+Avoid saying simply: "Kubernetes manages Docker containers."
 
 ---
 
-# 13. Deploy the application to Kubernetes
+# 15. Deploy to Kubernetes
 
-First make sure your local image exists:
+Make sure the image exists:
 
 ```bash
 docker images docker-k8s-lab:local
 ```
 
-Apply the manifests:
+Apply:
 
 ```bash
 kubectl apply -f k8s/all.yaml
 ```
 
-Watch objects appear:
+Inspect:
 
 ```bash
 kubectl get all -n docker-k8s-lab
-```
-
-Watch Pods:
-
-```bash
-kubectl get pods -n docker-k8s-lab -w
-```
-
-Press `Ctrl+C` when everything is Running/Ready.
-
----
-
-# 14. Understand Pods, Deployments and Services
-
-## Pod
-
-A Pod is Kubernetes' smallest schedulable unit. One Pod can contain one or more tightly coupled containers sharing networking and certain storage.
-
-```bash
 kubectl get pods -n docker-k8s-lab -o wide
 ```
 
-## Deployment
+The manifest creates:
 
-A Deployment describes desired state for stateless application Pods and manages ReplicaSets and rolling updates.
+- Namespace
+- ConfigMap
+- Secret
+- Redis Deployment
+- Redis Service
+- Java web Deployment with 3 replicas
+- Web Service
+
+---
+
+# 16. Pod, Deployment, ReplicaSet and Service
+
+**Pod**: smallest schedulable Kubernetes unit. Usually contains one primary application container.
+
+**ReplicaSet**: maintains the requested number of matching Pods.
+
+**Deployment**: higher-level controller that manages ReplicaSets and supports declarative updates/rollback.
+
+**Service**: stable network identity that routes traffic to matching Pods.
+
+Commands:
 
 ```bash
+kubectl get pods -n docker-k8s-lab
+kubectl get rs -n docker-k8s-lab
 kubectl get deployments -n docker-k8s-lab
-kubectl describe deployment web -n docker-k8s-lab
-```
-
-## Service
-
-Pod IP addresses change. A Kubernetes Service gives a stable virtual IP and DNS name and forwards traffic to matching Pods selected by labels.
-
-```bash
 kubectl get services -n docker-k8s-lab
-kubectl describe service web -n docker-k8s-lab
 ```
 
 Interview shorthand:
 
-> Deployment manages Pods. Service gives Pods a stable network identity.
+> Deployment manages application lifecycle; Service gives ephemeral Pods stable reachability.
 
 ---
 
-# 15. Access a ClusterIP Service using port-forward
+# 17. Access the app
 
-The `web` Service is intentionally `ClusterIP`, meaning it is reachable inside the cluster but not directly exposed outside.
-
-Forward a local port:
+The web Service is `ClusterIP`, so expose it locally using port forwarding:
 
 ```bash
 kubectl port-forward service/web 8080:80 -n docker-k8s-lab
 ```
 
-From another terminal:
+In another terminal:
 
 ```bash
 curl http://localhost:8080/
 ```
 
-Run it many times:
+Run repeatedly:
 
 ```bash
 for i in {1..10}; do curl -s http://localhost:8080/; echo; done
 ```
 
-Look at the `hostname` field. You should see different Pod hostnames over repeated requests because the Service distributes connections among the three ready web Pods.
+Observe `hostname`. Different Pod hostnames demonstrate that the Service can route connections across replicas.
 
 ---
 
-# 16. Kubernetes service discovery
+# 18. Kubernetes service discovery
 
-The application connects to Redis using:
+The Java app uses:
 
 ```text
 REDIS_HOST=redis
 ```
 
-Inside the namespace, Kubernetes DNS resolves `redis` to the Redis Service.
+The Kubernetes Service named `redis` provides the stable address.
 
-Try:
+Within the namespace, DNS resolves `redis`.
 
-```bash
-kubectl exec -it deployment/web -n docker-k8s-lab -- sh
-```
-
-Inside:
-
-```bash
-getent hosts redis
-exit
-```
-
-Fully qualified service DNS is conceptually:
+Fully qualified DNS resembles:
 
 ```text
 redis.docker-k8s-lab.svc.cluster.local
 ```
 
+This means Pods can be replaced without application code tracking their changing IP addresses.
+
 ---
 
-# 17. ConfigMaps and Secrets
+# 19. ConfigMap versus Secret
 
-Inspect configuration:
+Inspect:
 
 ```bash
 kubectl get configmap app-config -n docker-k8s-lab -o yaml
 kubectl get secret app-secret -n docker-k8s-lab -o yaml
 ```
 
-A ConfigMap is for non-sensitive configuration.
+- ConfigMap = non-sensitive configuration
+- Secret = sensitive configuration mechanism
 
-A Secret is for sensitive data, but important interview nuance:
+Important security nuance:
 
-> Kubernetes Secrets are base64-encoded by default, not automatically encrypted merely because they are called Secrets. Production security may require encryption at rest, strong RBAC and external secret-management solutions.
-
-Check environment variables in one web Pod:
-
-```bash
-kubectl exec deployment/web -n docker-k8s-lab -- env | grep -E 'APP_|REDIS_'
-```
+> Kubernetes Secrets are base64 encoded by default; base64 is not encryption. Production security typically also relies on RBAC, encryption at rest and/or external secret managers.
 
 ---
 
-# 18. Liveness vs readiness probes
+# 20. Liveness versus readiness
 
-The app exposes:
+Manifest:
 
-- `/health` for liveness
-- `/ready` for readiness
+- `/health` is the liveness probe.
+- `/ready` is the readiness probe.
 
-Concept:
+Think of it this way:
 
-- **Liveness** asks: should Kubernetes restart this container?
-- **Readiness** asks: should this Pod receive traffic right now?
+**Liveness:** "Should Kubernetes restart me?"
 
-A container can be alive but temporarily not ready.
+**Readiness:** "Should Kubernetes send traffic to me?"
 
-Example: if Redis is unavailable, `/ready` returns HTTP 503. The web process is still alive, but it cannot fully serve the intended workload.
+The Java process can remain alive while Redis is unavailable. In that case it should not be considered ready for traffic.
 
-Interview line:
+Excellent interview line:
 
-> Liveness protects process health; readiness protects traffic quality.
+> Liveness protects process recovery. Readiness protects traffic quality.
 
 ---
 
-# 19. Self-healing experiment
-
-List Pods:
+# 21. Self-healing experiment
 
 ```bash
 kubectl get pods -n docker-k8s-lab
-```
-
-Delete one web Pod:
-
-```bash
-kubectl delete pod <WEB_POD_NAME> -n docker-k8s-lab
-```
-
-Immediately watch:
-
-```bash
+kubectl delete pod <one-web-pod-name> -n docker-k8s-lab
 kubectl get pods -n docker-k8s-lab -w
 ```
 
-A replacement appears automatically.
+A replacement Pod appears.
 
 Why?
 
-You did not tell Kubernetes "keep this Pod alive". You told the Deployment:
+The Deployment desired state says `replicas: 3`. Kubernetes controllers continuously reconcile actual state toward desired state.
 
-```text
-replicas: 3
-```
+Key phrase:
 
-The Deployment controller continuously reconciles actual state toward desired state.
-
-This is a foundational Kubernetes idea:
-
-> **Declarative desired state + reconciliation loop.**
+> Declarative desired state plus reconciliation loop.
 
 ---
 
-# 20. Scale the application
-
-Scale from 3 Pods to 5:
+# 22. Scale the Java application
 
 ```bash
 kubectl scale deployment web --replicas=5 -n docker-k8s-lab
 kubectl get pods -n docker-k8s-lab
 ```
 
-Scale down to 2:
+Then:
 
 ```bash
 kubectl scale deployment web --replicas=2 -n docker-k8s-lab
-```
-
-Return to 3:
-
-```bash
 kubectl scale deployment web --replicas=3 -n docker-k8s-lab
 ```
 
-Important:
+Manual scaling explicitly changes desired replica count.
 
-Manual scaling changes replica count. Horizontal Pod Autoscaler can adjust replicas automatically based on observed metrics, but it requires the metrics pipeline to be available.
+Horizontal Pod Autoscaler can change replica count automatically from metrics when the metrics infrastructure is available.
 
 ---
 
-# 21. Rolling update
+# 23. Rolling update and rollback
 
-Create a second image:
-
-Edit `app.py` or change the default message, then:
+Edit the default `APP_MESSAGE` in `docker-compose.yml`, or edit Java code, then build another image:
 
 ```bash
 docker build -t docker-k8s-lab:v2 .
 ```
 
-Update Kubernetes:
+Update:
 
 ```bash
 kubectl set image deployment/web web=docker-k8s-lab:v2 -n docker-k8s-lab
 kubectl rollout status deployment/web -n docker-k8s-lab
-```
-
-Watch ReplicaSets:
-
-```bash
-kubectl get rs -n docker-k8s-lab
-```
-
-Inspect history:
-
-```bash
 kubectl rollout history deployment/web -n docker-k8s-lab
 ```
 
@@ -664,21 +655,19 @@ Rollback:
 kubectl rollout undo deployment/web -n docker-k8s-lab
 ```
 
-Interview concept:
+Concept:
 
-> A Deployment performs rolling updates by gradually replacing old ReplicaSet Pods with new ones while respecting availability constraints.
+> A Deployment normally performs a rolling update by gradually creating Pods from a new ReplicaSet while removing Pods from the previous ReplicaSet.
 
 ---
 
-# 22. Simulate a broken deployment
-
-Set a nonexistent image:
+# 24. Break the image deliberately
 
 ```bash
 kubectl set image deployment/web web=docker-k8s-lab:this-tag-does-not-exist -n docker-k8s-lab
 ```
 
-Inspect:
+Troubleshoot:
 
 ```bash
 kubectl get pods -n docker-k8s-lab
@@ -686,7 +675,7 @@ kubectl describe pods -n docker-k8s-lab
 kubectl get events -n docker-k8s-lab --sort-by=.lastTimestamp
 ```
 
-You will likely see `ImagePullBackOff`/`ErrImagePull` behavior depending on your environment.
+You may see `ErrImagePull` or `ImagePullBackOff`.
 
 Recover:
 
@@ -694,347 +683,153 @@ Recover:
 kubectl rollout undo deployment/web -n docker-k8s-lab
 ```
 
-This exercise teaches a strong troubleshooting flow:
+Strong troubleshooting order:
 
 1. `kubectl get`
 2. `kubectl describe`
 3. `kubectl logs`
-4. `kubectl events`
-5. inspect configuration, image and dependencies
+4. `kubectl get events`
+5. inspect image/configuration/dependencies/networking
 
 ---
 
-# 23. Break the Redis dependency intentionally
-
-Scale Redis to zero:
+# 25. Break Redis deliberately
 
 ```bash
 kubectl scale deployment redis --replicas=0 -n docker-k8s-lab
 ```
 
-Check web readiness:
+Now inspect:
 
 ```bash
+curl http://localhost:8080/ready
 kubectl get pods -n docker-k8s-lab
+kubectl describe pods -n docker-k8s-lab
+kubectl logs deployment/web -n docker-k8s-lab
 ```
 
-The web Pods may become NotReady because `/ready` cannot reach Redis.
-
-Restore Redis:
+Restore:
 
 ```bash
 kubectl scale deployment redis --replicas=1 -n docker-k8s-lab
 ```
 
-Observe readiness recover.
+This gives you a realistic answer to:
 
-This is a very useful interview scenario because it distinguishes:
+> "The Pod is running, but the application isn't serving traffic. How do you troubleshoot?"
 
-- application process health
-- dependency health
-- readiness to receive traffic
+Do not stop at Pod status. Check readiness, logs, dependent Services, endpoints, DNS and configuration.
 
 ---
 
-# 24. Logs in Kubernetes
+# 26. Useful commands to know by hand
 
-Show logs for a Deployment:
+Docker:
 
 ```bash
-kubectl logs deployment/web -n docker-k8s-lab
+docker build -t NAME:TAG .
+docker images
+docker run -p HOST:CONTAINER IMAGE
+docker ps
+docker logs CONTAINER
+docker exec -it CONTAINER sh
+docker inspect CONTAINER
+docker network ls
+docker volume ls
+docker compose up -d --build
+docker compose ps
+docker compose logs -f
+docker compose down
+docker compose down -v
 ```
 
-Follow logs:
+Kubernetes:
 
 ```bash
-kubectl logs -f deployment/web -n docker-k8s-lab
+kubectl get pods
+kubectl get deployments
+kubectl get services
+kubectl describe pod POD
+kubectl logs POD
+kubectl logs deployment/web
+kubectl exec -it POD -- sh
+kubectl get events --sort-by=.lastTimestamp
+kubectl scale deployment web --replicas=5
+kubectl set image deployment/web web=IMAGE:TAG
+kubectl rollout status deployment/web
+kubectl rollout history deployment/web
+kubectl rollout undo deployment/web
+kubectl port-forward service/web 8080:80
 ```
-
-For a specific Pod:
-
-```bash
-kubectl logs <POD_NAME> -n docker-k8s-lab
-```
-
-If a Pod has multiple containers:
-
-```bash
-kubectl logs <POD_NAME> -c <CONTAINER_NAME> -n docker-k8s-lab
-```
-
-Interview point:
-
-> In production, Pods are ephemeral, so centralized logging is generally required instead of relying on local container log files.
 
 ---
 
-# 25. `kubectl exec` and troubleshooting
+# 27. Interview questions you should be able to answer after the lab
 
-```bash
-kubectl exec -it deployment/web -n docker-k8s-lab -- sh
-```
-
-Inside:
-
-```bash
-hostname
-env | sort
-getent hosts redis
-python -c "import socket; print(socket.gethostbyname('redis'))"
-exit
-```
-
-Use `exec` carefully in production. It is useful for diagnosis, but good systems should be observable without routinely SSH-ing or shelling into workloads.
-
----
-
-# 26. Labels and selectors
-
-Run:
-
-```bash
-kubectl get pods -n docker-k8s-lab --show-labels
-kubectl get pods -n docker-k8s-lab -l app=web
-```
-
-The Service's selector is:
-
-```yaml
-selector:
-  app: web
-```
-
-That is how Kubernetes determines which Pods are endpoints for the Service.
-
-Interview concept:
-
-> Kubernetes resources are loosely coupled using labels and selectors.
+1. What is the difference between an image and a container?
+2. What does a Dockerfile do?
+3. Why use a multi-stage Docker build for Java?
+4. What is the difference between `EXPOSE` and `-p`?
+5. Why doesn't `localhost` reach another container?
+6. How does Docker Compose service discovery work?
+7. Why use a volume?
+8. What happens to data in a container writable layer when the container is deleted?
+9. Why does Dockerfile instruction order matter?
+10. What is an image tag? What is an image digest?
+11. Container versus VM?
+12. What are namespaces and cgroups conceptually?
+13. Does Kubernetes require Docker Engine?
+14. Pod versus container?
+15. Deployment versus Pod?
+16. What does a ReplicaSet do?
+17. Why do we need a Kubernetes Service?
+18. ClusterIP versus NodePort versus LoadBalancer?
+19. How does Kubernetes service discovery work?
+20. ConfigMap versus Secret?
+21. Liveness versus readiness?
+22. What do resource requests and limits mean?
+23. What happens when a Pod dies under a Deployment?
+24. How does Kubernetes scaling work?
+25. How does a rolling update work?
+26. How do you roll back a failed release?
+27. What causes `ImagePullBackOff`?
+28. What causes `CrashLoopBackOff`?
+29. A Pod is Running but unavailable to users. What do you inspect?
+30. Docker Compose versus Kubernetes?
 
 ---
 
-# 27. Requests and limits
+# 28. Five interview traps
 
-The manifest contains CPU and memory requests/limits.
+## Trap 1: "Kubernetes manages Docker containers"
 
-Concept:
+Better:
 
-- `requests` influence scheduling; they describe resources the scheduler should reserve for placement decisions.
-- `limits` cap resource consumption where enforceable.
+> Kubernetes orchestrates containerized workloads through a CRI-compatible runtime. OCI images created with Docker are compatible with runtimes such as containerd.
 
-Example values:
+## Trap 2: "A container has its own operating system"
 
-```yaml
-resources:
-  requests:
-    cpu: "50m"
-    memory: "64Mi"
-  limits:
-    cpu: "300m"
-    memory: "128Mi"
-```
+Better:
 
-`50m` CPU means 50 millicores, or 0.05 CPU.
+> Linux containers normally share the host kernel while receiving isolated process/network/filesystem views.
 
----
+## Trap 3: "A Kubernetes Service is a load balancer"
 
-# 28. Compose vs Kubernetes
+More precise:
 
-Docker Compose is excellent for local multi-container development and simple single-host environments.
+> A Service provides stable service discovery and virtual networking to a changing set of selected Pods. `LoadBalancer` is one Service type used to request external exposure from supporting infrastructure.
 
-Kubernetes is designed for orchestrating workloads across a cluster with controllers, declarative state, service discovery, rolling updates, scheduling and self-healing.
+## Trap 4: "If a Pod says Running, the application is healthy"
 
-Good interview answer:
+Wrong. `Running` describes lifecycle state. Readiness determines whether it should receive Service traffic.
 
-> Compose describes how my local application services run together. Kubernetes describes desired application state in a cluster and continuously reconciles that state.
+## Trap 5: "Secrets are encrypted because they are base64"
+
+Wrong. Base64 is encoding, not encryption.
 
 ---
 
-# 29. Docker networking questions you should be able to answer
-
-## What happens with `-p 5000:5000`?
-
-Host port 5000 is published to container port 5000.
-
-## Does `EXPOSE 5000` publish the port?
-
-No. `EXPOSE` is image metadata/documentation. Publishing happens using `-p`, Compose ports, or an orchestration networking mechanism.
-
-## Why can `app` call `redis:6379` in Compose?
-
-Compose creates a network and DNS entries for service names.
-
-## Why not use a container IP?
-
-Container IPs are dynamic implementation details. Use service names/DNS.
-
----
-
-# 30. Docker image questions you should be able to answer
-
-## Image vs container
-
-Image = immutable package/template.
-Container = running instance of the image.
-
-## Dockerfile vs image
-
-Dockerfile = instructions/source recipe.
-Image = build output.
-
-## Registry
-
-A registry stores and distributes container images. Docker Hub is a registry service.
-
-Typical flow:
-
-```text
-Dockerfile -> docker build -> image -> docker push -> registry -> docker pull -> container runtime
-```
-
-## What is a layer?
-
-Filesystem changes are stored as content-addressed immutable layers. Layers can be reused between images and cached during builds.
-
----
-
-# 31. Kubernetes questions you should be able to answer
-
-## Container vs Pod
-
-Container = isolated running application process.
-Pod = Kubernetes scheduling unit containing one or more containers.
-
-## Pod vs Deployment
-
-Pod = workload instance.
-Deployment = controller that manages replicated stateless Pods and rolling updates.
-
-## Deployment vs StatefulSet
-
-Deployment is typically used for stateless interchangeable replicas.
-StatefulSet is intended for workloads needing stable identity, ordered behavior and/or stable persistent storage relationships.
-
-## Service types
-
-- `ClusterIP`: internal cluster endpoint.
-- `NodePort`: exposes a port on each node.
-- `LoadBalancer`: asks the environment/cloud provider to provision an external load balancer.
-- `ExternalName`: DNS alias to an external name.
-
-## Ingress
-
-Ingress is an HTTP/HTTPS routing API. An Ingress Controller actually implements the routing.
-
-Modern Kubernetes also has Gateway API, designed as a more expressive successor for many traffic-management use cases.
-
-## ConfigMap vs Secret
-
-ConfigMap = non-sensitive configuration.
-Secret = sensitive configuration object; still requires correct security controls.
-
-## Namespace
-
-Logical scope used to organize and isolate Kubernetes resources. It is not automatically a complete security boundary.
-
----
-
-# 32. Interview troubleshooting scenarios
-
-Practice answering these out loud.
-
-## Scenario A: Pod is Pending
-
-Check:
-
-```bash
-kubectl describe pod <pod> -n docker-k8s-lab
-kubectl get events -n docker-k8s-lab --sort-by=.lastTimestamp
-```
-
-Possible causes:
-
-- insufficient CPU/memory
-- node selector/affinity mismatch
-- unbound PersistentVolumeClaim
-- taints not tolerated
-
-## Scenario B: `CrashLoopBackOff`
-
-Check:
-
-```bash
-kubectl logs <pod> -n docker-k8s-lab
-kubectl logs <pod> --previous -n docker-k8s-lab
-kubectl describe pod <pod> -n docker-k8s-lab
-```
-
-Likely causes include application crash, bad configuration, missing dependency, incorrect command or failing liveness probe.
-
-## Scenario C: `ImagePullBackOff`
-
-Check image name/tag, registry access, imagePullSecrets, network and registry availability.
-
-## Scenario D: Pod Running but application unavailable
-
-Check:
-
-- readiness state
-- Service selector
-- Service targetPort
-- application listening interface (`0.0.0.0` vs `127.0.0.1`)
-- NetworkPolicy if present
-- DNS/dependencies
-
-## Scenario E: Service has no endpoints
-
-```bash
-kubectl get endpoints web -n docker-k8s-lab
-kubectl get pods --show-labels -n docker-k8s-lab
-kubectl describe service web -n docker-k8s-lab
-```
-
-Most common conceptual issue: Service selector does not match Pod labels or Pods are not ready.
-
----
-
-# 33. Security concepts worth knowing for a Docker interview
-
-You do not need to become a security engineer in four days, but know these principles:
-
-1. Use minimal trusted base images.
-2. Pin versions/digests where appropriate.
-3. Scan images for vulnerabilities.
-4. Do not bake secrets into Dockerfiles or images.
-5. Prefer non-root containers where possible.
-6. Drop unnecessary Linux capabilities.
-7. Use read-only filesystems where appropriate.
-8. Set CPU/memory controls.
-9. Sign/verify image provenance where the organization requires it.
-10. Keep dependencies and base images patched.
-11. Separate build-time and runtime artifacts using multi-stage builds when useful.
-12. Apply least-privilege RBAC and network controls in Kubernetes.
-
-Docker-specific product areas worth recognizing for your interview include Docker Desktop, Docker Hub, Docker Build/BuildKit, Docker Compose, Docker Scout and Docker Hardened Images.
-
----
-
-# 34. Optional exercise: improve the Dockerfile
-
-The current Dockerfile is intentionally understandable rather than maximally hardened.
-
-Try improving it by:
-
-- creating a non-root user
-- pinning the base image by digest
-- adding labels
-- using a multi-stage build if you add build-time dependencies
-- scanning the built image
-
-Then be ready to explain the tradeoff between simplicity, reproducibility, build speed, size and security.
-
----
-
-# 35. Clean up
+# 29. Cleanup
 
 Docker Compose:
 
@@ -1048,7 +843,7 @@ Kubernetes:
 kubectl delete namespace docker-k8s-lab
 ```
 
-Optional remove images:
+Optional images:
 
 ```bash
 docker image rm docker-k8s-lab:local docker-k8s-lab:v1 docker-k8s-lab:v2
@@ -1056,148 +851,8 @@ docker image rm docker-k8s-lab:local docker-k8s-lab:v1 docker-k8s-lab:v2
 
 ---
 
-# 36. 25 rapid-fire interview questions
+# 30. The story you should eventually be able to tell Docker
 
-Practice these until you can answer each in 20-40 seconds.
+> I built a small Spring Boot service backed by Redis and containerized it with a multi-stage Dockerfile. I ran the application locally with Docker Compose, used service-name DNS for container networking and a named volume for persistence. I then deployed the same application to Kubernetes using Deployments, Services, ConfigMaps, Secrets, liveness/readiness probes and resource controls. I scaled the workload, deleted Pods to observe reconciliation, performed a rolling update and rollback, and deliberately broke image and dependency scenarios so I could practice troubleshooting with get, describe, logs and events.
 
-1. What problem do containers solve?
-2. Image vs container?
-3. Container vs VM?
-4. Dockerfile vs Docker image?
-5. What is a Docker image layer?
-6. Why use `.dockerignore`?
-7. What is Docker build cache?
-8. `COPY` vs volume?
-9. `EXPOSE` vs `-p`?
-10. Why should configuration be externalized?
-11. How does container DNS/networking work in Compose?
-12. What is a registry? What is Docker Hub?
-13. What is Docker Compose useful for?
-14. Why Kubernetes if Docker already runs containers?
-15. What is a Pod?
-16. What does a Deployment do?
-17. What is a ReplicaSet?
-18. What does a Service solve?
-19. ClusterIP vs NodePort vs LoadBalancer?
-20. Liveness vs readiness?
-21. ConfigMap vs Secret?
-22. What happens when a Pod dies under a Deployment?
-23. How does a rolling update work?
-24. How would you debug a failing Pod?
-25. What does Kubernetes mean by desired state and reconciliation?
-
----
-
-# 37. Five questions that can expose shallow understanding
-
-## 1. Does Kubernetes require Docker Engine?
-
-No. Modern Kubernetes uses the Container Runtime Interface. containerd and CRI-O are common runtimes. Docker-built OCI-compatible images can still run perfectly well.
-
-## 2. Does a container have its own operating-system kernel?
-
-Normally, Linux containers share the host Linux kernel. They get isolated views of system resources using kernel primitives.
-
-## 3. Does `EXPOSE 5000` open port 5000 on the host?
-
-No.
-
-## 4. Is a Kubernetes Service a running proxy Pod?
-
-Not conceptually. A Service is an API abstraction providing stable networking to selected endpoints. The implementation depends on cluster networking components such as kube-proxy or eBPF-based dataplanes.
-
-## 5. If a Pod is Running, does that mean it should receive traffic?
-
-No. It must also satisfy readiness criteria to be considered ready for Service traffic.
-
----
-
-# 38. Your 90-second interview explanation
-
-Use this structure rather than memorizing every word:
-
-> Docker lets us package an application and its user-space dependencies into a portable image. When we run that image, we get a container: an isolated process environment that normally shares the host kernel, which makes containers much lighter than full virtual machines. For a multi-service application, Docker Compose makes it easy to run the services together locally and gives them service-name-based networking. Once we need orchestration across many workloads or machines, Kubernetes manages the desired state. We define Deployments, Services, configuration and health probes declaratively. Kubernetes then schedules Pods, keeps the requested replica count running, routes traffic only to ready endpoints and supports rolling updates and self-healing. In this lab I built one image, ran it with Redis using Compose, then deployed the exact application concept to Kubernetes and practiced scaling, failure recovery, probes, service discovery and rollout/rollback.
-
-Do not deliver this like a textbook. Anchor the explanation to things you personally did in the lab.
-
----
-
-# 39. Recommended practice order
-
-## Pass 1 - Docker basics
-
-Do sections 4 through 10.
-
-Goal: image/container/network/volume/log/exec/build concepts feel natural.
-
-## Pass 2 - Kubernetes basics
-
-Do sections 13 through 18.
-
-Goal: confidently explain Pod, Deployment, Service, ConfigMap, Secret and probes.
-
-## Pass 3 - failure and operations
-
-Do sections 19 through 25.
-
-Goal: scaling, self-healing, rolling update, rollback and troubleshooting.
-
-## Pass 4 - interview mode
-
-Close the README.
-
-Without notes, explain the architecture and answer the rapid-fire questions.
-
-Then reopen the README and correct gaps.
-
----
-
-# 40. Definition cheat sheet
-
-**Dockerfile** - declarative instructions used to build an image.
-
-**Image** - immutable packaged filesystem and metadata used to create containers.
-
-**Container** - isolated running instance of an image.
-
-**Registry** - remote image storage/distribution service.
-
-**Volume** - storage whose lifecycle can be independent of a container.
-
-**Compose** - tool/specification for defining and running multi-container applications.
-
-**Cluster** - Kubernetes control plane plus worker-node resources.
-
-**Node** - machine/VM participating in a Kubernetes cluster.
-
-**Pod** - smallest Kubernetes scheduling unit.
-
-**Deployment** - controller for replicated stateless Pods and rolling updates.
-
-**ReplicaSet** - controller that maintains a target number of matching Pods; normally managed by a Deployment.
-
-**Service** - stable networking abstraction over selected Pods/endpoints.
-
-**ConfigMap** - Kubernetes non-secret configuration object.
-
-**Secret** - Kubernetes object for sensitive configuration data.
-
-**Namespace** - logical grouping/scope for Kubernetes objects.
-
-**Liveness probe** - determines whether a container should be restarted.
-
-**Readiness probe** - determines whether a Pod should receive traffic.
-
-**Ingress** - API for routing external HTTP(S) requests to Services, implemented by an Ingress controller.
-
----
-
-## Final rule for the interview
-
-Do not say, "Kubernetes manages Docker containers."
-
-A more technically accurate version is:
-
-> Docker provides developer tooling for building and running containerized applications, while Kubernetes orchestrates containerized workloads at cluster scale using a CRI-compatible runtime.
-
-That one sentence will keep you out of several common technical traps.
+The important part is that you should only use this answer after doing the exercises yourself. The objective is genuine hands-on confidence, not memorization.
